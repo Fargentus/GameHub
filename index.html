@@ -26,3 +26,51 @@
     </header>
   </body>
 </html>
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="style.css" />
+    <title>Gamehub</title>
+</head>
+<body>
+
+
+    <header class="header">
+
+        <h1 class="logo">GAMEHUB</h1>
+        
+
+        <div class="header-actions">
+            <div class="search-box">
+                <input type="text" id="searchInput" placeholder="Game search">
+                <button id="searchBtn" class="btn">Шукати</button>
+            </div>
+            
+            <nav class="nav">
+                <ul class="nav-list">
+                    <li><button class="nav-btn" id="genresBtn">Жанри</button></li>
+                </ul>
+            </nav>
+        </div>
+    </header>
+
+
+    <main class="container">
+        <div class="results-info" id="resultsInfo"></div>
+
+        <div class="game-grid" id="gamesGrid"></div>
+
+
+        <div class="modal" id="modal">
+            <div class="modal-content">
+                <button class="modal-close" id="modalClose">×</button>
+                <div class="modal-body" id="modalBody"></div>
+            </div>
+        </div>
+    </main>
+
+    <script src="script.js"></script>
+</body>
+</html>
