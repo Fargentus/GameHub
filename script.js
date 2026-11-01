@@ -1,7 +1,6 @@
 "use strict";
-
 const CONFIG = {
-    apiBase: "http://gamehubproxy.kitpvp.su:40063",
+    apiBase: "https://gamehubproxy.kitpvp.su:40063/steam/search?term=&start=0&count=50&cc=ua&l=ukrainian",
     steamStore: "https://store.steampowered.com",
     country: "ua",
     language: "ukrainian",
