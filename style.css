@@ -382,7 +382,7 @@ a {
     overflow: hidden;
     border: 1px solid rgba(9, 35, 40, 0.12);
     border-radius: 4px;
-    background: rgb(9, 35, 40);
+    background: rgba(9, 35, 40, 0.08);
     color: var(--color-dark);
     font-size: 11px;
     line-height: 1.3;
