@@ -184,7 +184,9 @@ async function fetchJSON(url, options = {}) {
 }
 
 function buildSearchURL(offset) {
-    const url = new URL(`${CONFIG.apiBase}/steam/search`);
+    const url = new URL(
+        `${CONFIG.apiBase}/steam/search`
+    );
 
     url.searchParams.set("term", state.query);
     url.searchParams.set("start", String(offset));
@@ -641,7 +643,9 @@ function onScroll() {
 
 
 async function fetchGameDetails(appId) {
-    const url = new URL(`${CONFIG.apiBase}/steam/appdetails`);
+    const url = new URL(
+        `${CONFIG.apiBase}/steam/appdetails`
+    );
 
     url.searchParams.set("appids", String(appId));
     url.searchParams.set("cc", CONFIG.country);
