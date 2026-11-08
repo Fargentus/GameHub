@@ -6,8 +6,7 @@ const CONFIG = {
     language: "ukrainian",
     pageSize: 50,
     requestTimeout: 20000,
-    detailsConcurrency: 1,
-    detailsRequestDelay: 600,
+    detailsConcurrency: 2,
     scrollThreshold: 700
 };
 
@@ -48,7 +47,6 @@ const state = {
     offset: 0,
     loading: false,
     exhausted: false,
-    failed: false,
     sourceExhausted: false,
     requestId: 0,
     games: [],
@@ -59,6 +57,7 @@ const state = {
     activeDetails: 0,
     detailPromises: new Map(),
     queuedDetailIds: new Set(),
+    detailObserver: null,
     searchController: null,
     modalRequestId: 0,
     scrollFrame: 0
@@ -83,7 +82,6 @@ function escapeHTML(value) {
         "'": "&#039;"
     })[char]);
 }
-
 
 function isRelevantTitle(title, query) {
     const normalizedTitle = normalizeText(title);
@@ -159,9 +157,7 @@ async function fetchText(url, options = {}) {
         });
 
         if (!response.ok) {
-            const error = new Error(`HTTP ${response.status}`);
-            error.status = response.status;
-            throw error;
+            throw new Error(`HTTP ${response.status}`);
         }
 
         const text = await response.text();
@@ -188,9 +184,7 @@ async function fetchJSON(url, options = {}) {
 }
 
 function buildSearchURL(offset) {
-    const url = new URL(
-        `${CONFIG.apiBase}/steam/search`
-    );
+    const url = new URL(`${CONFIG.apiBase}/steam/search`);
 
     url.searchParams.set("term", state.query);
     url.searchParams.set("start", String(offset));
@@ -260,25 +254,16 @@ function parseSteamSearch(html) {
         const rawAppId = row.getAttribute("data-ds-appid");
         const appId = Number(rawAppId?.split(",")[0]);
 
-        if (!Number.isSafeInteger(appId) || appId <= 0) {
-            continue;
-        }
+        if (!Number.isSafeInteger(appId) || appId <= 0) continue;
+        if (seenIds.has(appId)) continue;
 
-        if (seenIds.has(appId)) {
-            continue;
-        }
-
-        const titleNode = row.querySelector(
-            ".title, .search_name"
-        );
+        const titleNode = row.querySelector(".title, .search_name");
 
         const title = titleNode?.textContent
             ?.replace(/\s+/g, " ")
             .trim();
 
-        if (!title) {
-            continue;
-        }
+        if (!title) continue;
 
         const image = row.querySelector("img");
         const rating = parseRating(row);
@@ -319,7 +304,6 @@ function matchesGenre(game) {
     const genre = GENRES[state.selectedGenre];
 
     if (!genre) return true;
-
     if (!game.tagIds.length) return false;
 
     return genre.ids.some(id => game.tagIds.includes(id));
@@ -329,22 +313,19 @@ function matchesCategory(game) {
     switch (state.selectedCategory) {
         case "popular":
             return (game.ratingPercent ?? 0) >= 80;
-
         case "positive":
             return (game.ratingPercent ?? 0) >= 70;
-
         case "free":
             return isFreeGame(game);
-
         default:
             return true;
     }
 }
 
 function shouldDisplayGame(game) {
-    // Steam уже виконав пошук за запитом. Не фільтруємо повторно за назвою,
-    // щоб не втрачати результати на кшталт CS:GO / Counter-Strike 2.
-    return matchesGenre(game) && matchesCategory(game);
+    return isRelevantTitle(game.title, state.query)
+        && matchesGenre(game)
+        && matchesCategory(game);
 }
 
 function starsForRating(percent) {
@@ -397,7 +378,11 @@ function createGameCard(game) {
         image.style.visibility = "hidden";
     }, { once: true });
 
-    queueGameDetails(game.appId);
+    if (state.detailObserver) {
+        state.detailObserver.observe(card);
+    } else {
+        queueGameDetails(game.appId);
+    }
 
     return card;
 }
@@ -418,7 +403,6 @@ function renderGames(games, append = false) {
     ELEMENTS.gamesGrid.appendChild(fragment);
 
     updateResultsInfo();
-
 }
 
 function updateResultsInfo() {
@@ -450,7 +434,7 @@ function takePendingMatches(target) {
 }
 
 async function loadNextPage() {
-    if (state.loading || state.exhausted || state.failed) return;
+    if (state.loading || state.exhausted) return;
 
     state.loading = true;
     const requestId = state.requestId;
@@ -508,20 +492,11 @@ async function loadNextPage() {
 
                     lastError = error;
 
-                    // 403 означає відмову доступу. Повторні запити лише
-                    // збільшують навантаження та можуть посилити блокування.
-                    if (error.status === 403) break;
-
-                    const retryable =
-                        error.status == null ||
-                        error.status === 429 ||
-                        error.status >= 500;
-
-                    if (!retryable || attempt === 3) break;
-
-                    await new Promise(resolve =>
-                        setTimeout(resolve, attempt * 1500)
-                    );
+                    if (attempt < 3) {
+                        await new Promise(resolve =>
+                            setTimeout(resolve, attempt * 500)
+                        );
+                    }
                 }
             }
 
@@ -570,13 +545,8 @@ async function loadNextPage() {
             requestId === state.requestId &&
             error.name !== "AbortError"
         ) {
-            console.error("Помилка завантаження Steam:", error);
-            state.failed = true;
-            setStatus(
-                error.status === 403
-                    ? "Steam тимчасово відхилив запит (403). Зачекайте або повторіть пошук."
-                    : `Не вдалося завантажити ігри: ${error.message}`
-            );
+            console.error("Ошибка загрузки Steam:", error);
+            setStatus(`Не удалось загрузить игры: ${error.message}`);
         }
     } finally {
         if (requestId === state.requestId) {
@@ -607,7 +577,6 @@ function resetSearch() {
     state.offset = 0;
     state.loading = false;
     state.exhausted = false;
-    state.failed = false;
     state.sourceExhausted = false;
     state.games = [];
     state.pendingMatches = [];
@@ -625,7 +594,7 @@ function onScroll() {
     state.scrollFrame = requestAnimationFrame(() => {
         state.scrollFrame = 0;
 
-        if (state.loading || state.exhausted || state.failed) return;
+        if (state.loading || state.exhausted) return;
 
         const cards = ELEMENTS.gamesGrid?.querySelectorAll(".game-card");
 
@@ -649,9 +618,7 @@ function onScroll() {
 }
 
 async function fetchGameDetails(appId) {
-    const url = new URL(
-        `${CONFIG.apiBase}/steam/appdetails`
-    );
+    const url = new URL(`${CONFIG.apiBase}/steam/appdetails`);
 
     url.searchParams.set("appids", String(appId));
     url.searchParams.set("cc", CONFIG.country);
@@ -706,19 +673,85 @@ async function fetchGameDetails(appId) {
     };
 }
 
-function queueGameDetails(appId) {
-    if (
-        state.detailCache.has(appId) ||
-        state.detailPromises.has(appId) ||
-        state.queuedDetailIds.has(appId)
-    ) {
-        return;
+/*
+ * Добавляет игру в очередь.
+ * priority = true — ставит игру в начало очереди,
+ * например, когда пользователь открыл её карточку.
+ */
+function queueGameDetails(appId, priority = false) {
+    if (state.detailCache.has(appId)) {
+        return Promise.resolve(state.detailCache.get(appId));
+    }
+
+    const existingPromise = state.detailPromises.get(appId);
+
+    if (existingPromise) {
+        if (priority && state.queuedDetailIds.has(appId)) {
+            state.detailQueue = state.detailQueue.filter(
+                id => id !== appId
+            );
+
+            state.detailQueue.unshift(appId);
+            processDetailQueue();
+        }
+
+        return existingPromise;
+    }
+
+    if (state.queuedDetailIds.has(appId)) {
+        if (priority) {
+            state.detailQueue = state.detailQueue.filter(
+                id => id !== appId
+            );
+
+            state.detailQueue.unshift(appId);
+            processDetailQueue();
+        }
+
+        return state.detailPromises.get(appId)
+            || new Promise(resolve => {
+                const check = () => {
+                    const promise = state.detailPromises.get(appId);
+
+                    if (promise) {
+                        promise.then(resolve);
+                    } else if (state.detailCache.has(appId)) {
+                        resolve(state.detailCache.get(appId));
+                    } else {
+                        setTimeout(check, 50);
+                    }
+                };
+
+                check();
+            });
     }
 
     state.queuedDetailIds.add(appId);
-    state.detailQueue.push(appId);
+
+    if (priority) {
+        state.detailQueue.unshift(appId);
+    } else {
+        state.detailQueue.push(appId);
+    }
 
     processDetailQueue();
+
+    return state.detailPromises.get(appId)
+        || new Promise(resolve => {
+            const check = () => {
+                const promise = state.detailPromises.get(appId);
+
+                if (promise) {
+                    promise.then(resolve);
+                } else if (state.detailCache.has(appId)) {
+                    resolve(state.detailCache.get(appId));
+                } else {
+                    setTimeout(check, 50);
+                }
+            };
+
+            check();
+        });
 }
 
 function processDetailQueue() {
@@ -756,17 +789,41 @@ function processDetailQueue() {
             .finally(() => {
                 state.detailPromises.delete(appId);
                 state.activeDetails--;
-
-                // Пауза між appdetails-запитами, щоб не створювати
-                // десятки одночасних звернень до Steam.
-                setTimeout(
-                    processDetailQueue,
-                    CONFIG.detailsRequestDelay
-                );
+                processDetailQueue();
             });
 
         state.detailPromises.set(appId, promise);
     }
+}
+
+/*
+ * Следит за карточками рядом с экраном.
+ * Подробная информация загружается только для них.
+ */
+function initDetailsObserver() {
+    if (!("IntersectionObserver" in window)) {
+        state.detailObserver = null;
+        return;
+    }
+
+    state.detailObserver = new IntersectionObserver(entries => {
+        for (const entry of entries) {
+            if (!entry.isIntersecting) continue;
+
+            const card = entry.target;
+            const appId = Number(card.dataset.appid);
+
+            state.detailObserver.unobserve(card);
+
+            if (Number.isSafeInteger(appId) && appId > 0) {
+                queueGameDetails(appId);
+            }
+        }
+    }, {
+        root: null,
+        rootMargin: "350px 0px",
+        threshold: 0
+    });
 }
 
 function updateCardDetails(appId, details) {
@@ -980,34 +1037,7 @@ async function openGameModal(appId) {
         let details = state.detailCache.get(appId);
 
         if (details === undefined) {
-            let promise = state.detailPromises.get(appId);
-
-            if (!promise) {
-                if (state.queuedDetailIds.has(appId)) {
-                    state.queuedDetailIds.delete(appId);
-                    state.detailQueue = state.detailQueue.filter(
-                        id => id !== appId
-                    );
-                }
-
-                promise = fetchGameDetails(appId)
-                    .then(result => {
-                        state.detailCache.set(appId, result);
-                        updateCardDetails(appId, result);
-                        return result;
-                    })
-                    .catch(error => {
-                        state.detailCache.set(appId, null);
-                        throw error;
-                    })
-                    .finally(() => {
-                        state.detailPromises.delete(appId);
-                    });
-
-                state.detailPromises.set(appId, promise);
-            }
-
-            details = await promise;
+            details = await queueGameDetails(appId, true);
         }
 
         if (modalRequestId !== state.modalRequestId) return;
@@ -1144,14 +1174,10 @@ function initFilterMenus() {
 }
 
 function init() {
-    if (window.__GAMEHUB_INITIALIZED__) return;
-
     if (!ELEMENTS.gamesGrid) {
         console.error("GAMEHUB: не знайдено елемент #gamesGrid.");
         return;
     }
-
-    window.__GAMEHUB_INITIALIZED__ = true;
 
     ELEMENTS.searchBtn?.addEventListener("click", resetSearch);
 
@@ -1180,6 +1206,7 @@ function init() {
     window.addEventListener("scroll", onScroll, { passive: true });
 
     initFilterMenus();
+    initDetailsObserver();
     resetSearch();
 }
 
