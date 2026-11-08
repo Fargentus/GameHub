@@ -6,7 +6,8 @@ const CONFIG = {
     language: "ukrainian",
     pageSize: 50,
     requestTimeout: 20000,
-    detailsConcurrency: 4,
+    detailsConcurrency: 1,
+    detailsRequestDelay: 600,
     scrollThreshold: 700
 };
 
@@ -47,6 +48,7 @@ const state = {
     offset: 0,
     loading: false,
     exhausted: false,
+    failed: false,
     sourceExhausted: false,
     requestId: 0,
     games: [],
@@ -157,7 +159,9 @@ async function fetchText(url, options = {}) {
         });
 
         if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
+            const error = new Error(`HTTP ${response.status}`);
+            error.status = response.status;
+            throw error;
         }
 
         const text = await response.text();
@@ -338,9 +342,9 @@ function matchesCategory(game) {
 }
 
 function shouldDisplayGame(game) {
-    return isRelevantTitle(game.title, state.query)
-        && matchesGenre(game)
-        && matchesCategory(game);
+    // Steam уже виконав пошук за запитом. Не фільтруємо повторно за назвою,
+    // щоб не втрачати результати на кшталт CS:GO / Counter-Strike 2.
+    return matchesGenre(game) && matchesCategory(game);
 }
 
 function starsForRating(percent) {
@@ -414,6 +418,7 @@ function renderGames(games, append = false) {
     ELEMENTS.gamesGrid.appendChild(fragment);
 
     updateResultsInfo();
+
 }
 
 function updateResultsInfo() {
@@ -444,10 +449,8 @@ function takePendingMatches(target) {
     }
 }
 
-
-
 async function loadNextPage() {
-    if (state.loading || state.exhausted) return;
+    if (state.loading || state.exhausted || state.failed) return;
 
     state.loading = true;
     const requestId = state.requestId;
@@ -455,7 +458,6 @@ async function loadNextPage() {
 
     updateResultsInfo();
 
-   
     function appendGame(game) {
         if (requestId !== state.requestId) return false;
 
@@ -467,7 +469,6 @@ async function loadNextPage() {
     }
 
     try {
-       
         while (
             state.pendingMatches.length > 0 &&
             addedCount < CONFIG.pageSize
@@ -479,7 +480,6 @@ async function loadNextPage() {
             );
         }
 
-       
         while (
             addedCount < CONFIG.pageSize &&
             !state.sourceExhausted
@@ -499,21 +499,29 @@ async function loadNextPage() {
                     parsedGames = parseSteamSearch(html);
                     break;
                 } catch (error) {
-                   
                     if (
                         requestId !== state.requestId ||
                         error.name === "AbortError"
                     ) {
                         return;
                     }
-                
+
                     lastError = error;
-                
-                    if (attempt < 3) {
-                        await new Promise(resolve =>
-                            setTimeout(resolve, attempt * 500)
-                        );
-                    }
+
+                    // 403 означає відмову доступу. Повторні запити лише
+                    // збільшують навантаження та можуть посилити блокування.
+                    if (error.status === 403) break;
+
+                    const retryable =
+                        error.status == null ||
+                        error.status === 429 ||
+                        error.status >= 500;
+
+                    if (!retryable || attempt === 3) break;
+
+                    await new Promise(resolve =>
+                        setTimeout(resolve, attempt * 1500)
+                    );
                 }
             }
 
@@ -562,8 +570,13 @@ async function loadNextPage() {
             requestId === state.requestId &&
             error.name !== "AbortError"
         ) {
-            console.error("Ошибка загрузки Steam:", error);
-            setStatus(`Не удалось загрузить игры: ${error.message}`);
+            console.error("Помилка завантаження Steam:", error);
+            state.failed = true;
+            setStatus(
+                error.status === 403
+                    ? "Steam тимчасово відхилив запит (403). Зачекайте або повторіть пошук."
+                    : `Не вдалося завантажити ігри: ${error.message}`
+            );
         }
     } finally {
         if (requestId === state.requestId) {
@@ -573,17 +586,13 @@ async function loadNextPage() {
     }
 }
 
-
-
 function setStatus(message) {
     if (ELEMENTS.resultsInfo) {
         ELEMENTS.resultsInfo.textContent = message;
     }
 }
 
-
 function resetSearch() {
-   
     state.searchController?.abort();
     state.searchController = new AbortController();
 
@@ -591,7 +600,6 @@ function resetSearch() {
 
     state.query = ELEMENTS.searchInput?.value.trim() || "";
 
-   
     if (state.query) {
         state.selectedGenre = "";
     }
@@ -599,6 +607,7 @@ function resetSearch() {
     state.offset = 0;
     state.loading = false;
     state.exhausted = false;
+    state.failed = false;
     state.sourceExhausted = false;
     state.games = [];
     state.pendingMatches = [];
@@ -610,15 +619,13 @@ function resetSearch() {
     loadNextPage();
 }
 
-
-
 function onScroll() {
     if (state.scrollFrame) return;
 
     state.scrollFrame = requestAnimationFrame(() => {
         state.scrollFrame = 0;
 
-        if (state.loading || state.exhausted) return;
+        if (state.loading || state.exhausted || state.failed) return;
 
         const cards = ELEMENTS.gamesGrid?.querySelectorAll(".game-card");
 
@@ -640,7 +647,6 @@ function onScroll() {
         }
     });
 }
-
 
 async function fetchGameDetails(appId) {
     const url = new URL(
@@ -750,7 +756,13 @@ function processDetailQueue() {
             .finally(() => {
                 state.detailPromises.delete(appId);
                 state.activeDetails--;
-                processDetailQueue();
+
+                // Пауза між appdetails-запитами, щоб не створювати
+                // десятки одночасних звернень до Steam.
+                setTimeout(
+                    processDetailQueue,
+                    CONFIG.detailsRequestDelay
+                );
             });
 
         state.detailPromises.set(appId, promise);
@@ -971,7 +983,6 @@ async function openGameModal(appId) {
             let promise = state.detailPromises.get(appId);
 
             if (!promise) {
-               
                 if (state.queuedDetailIds.has(appId)) {
                     state.queuedDetailIds.delete(appId);
                     state.detailQueue = state.detailQueue.filter(
@@ -999,8 +1010,6 @@ async function openGameModal(appId) {
             details = await promise;
         }
 
-       
-       
         if (modalRequestId !== state.modalRequestId) return;
 
         renderModalDetails(details, game);
@@ -1135,10 +1144,14 @@ function initFilterMenus() {
 }
 
 function init() {
+    if (window.__GAMEHUB_INITIALIZED__) return;
+
     if (!ELEMENTS.gamesGrid) {
         console.error("GAMEHUB: не знайдено елемент #gamesGrid.");
         return;
     }
+
+    window.__GAMEHUB_INITIALIZED__ = true;
 
     ELEMENTS.searchBtn?.addEventListener("click", resetSearch);
 
