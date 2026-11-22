@@ -1179,7 +1179,12 @@ function init() {
         return;
     }
 
-    ELEMENTS.searchBtn?.addEventListener("click", resetSearch);
+    ELEMENTS.searchBtn?.addEventListener("click", () => {
+  if (typeof gtag === "function") {
+    gtag("event", "click_reset_search_btn");
+  }
+  resetSearch();
+});
 
     ELEMENTS.searchInput?.addEventListener("keydown", event => {
         if (event.key === "Enter") {
